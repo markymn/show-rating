@@ -2,6 +2,8 @@
 
 A Chrome extension that displays IMDb ratings directly on Amazon Prime Video movie thumbnails.
 
+[ShowRating](https://chromewebstore.google.com/detail/showrating/jineioihjjjmbhkebmbghiobloejkmai)
+
 ![Version](https://img.shields.io/badge/version-1.0.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
