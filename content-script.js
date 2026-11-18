@@ -17,6 +17,9 @@
         WORKER_URL: 'https://imdb-ratings-proxy.markymn-dev.workers.dev'
     };
 
+    // How long cards wait before retrying after the worker reports OMDb's rate limit
+    const RATE_LIMIT_RETRY_MS = 5 * 60 * 1000;
+
     const log = (...args) => {
         if (CONFIG.DEBUG) console.log('[IMDb Prime]', ...args);
     };
@@ -187,9 +190,12 @@
             // Retry stuck pending items (failed requests that never resolved)
             // and cards whose link hadn't rendered yet
             if (status === 'pending' || status === 'retry') {
+                const retryAt = parseInt(program.dataset.retryAt || '0');
+                if (retryAt && Date.now() < retryAt) return; // rate-limit backoff
                 const pendingTime = parseInt(program.dataset.pendingSince || '0');
                 if (pendingTime && (Date.now() - pendingTime) < 10000) return;
                 program.removeAttribute(CONFIG.PROCESSED_ATTR);
+                delete program.dataset.retryAt;
             }
 
             // Safety net: badge exists but attribute was cleared (e.g. SPA nav)
@@ -208,25 +214,32 @@
             return;
         }
 
-        // Check session cache first
-        if (state.processedItems.has(info.href)) {
+        // Known answer from earlier in this session (survives SPA navigation,
+        // so switching pages inside Prime doesn't re-ask the worker).
+        // Skipped on detail pages: those carry Prime's own rating, which the
+        // worker uses to correct wrong matches, so they must always be sent.
+        if (!info.verificationRating && state.sessionCache.has(info.href)) {
             const cached = state.sessionCache.get(info.href);
-            if (state.sessionCache.has(info.href) && !cached) {
-                // Lookup already completed with no rating
-                program.setAttribute(CONFIG.PROCESSED_ATTR, 'no-data');
-            } else if (cached) {
+            if (cached) {
                 // Defer DOM work — don't inject synchronously in the scan loop
                 deferredInjections.push({ program, cached, href: info.href });
                 program.setAttribute(CONFIG.PROCESSED_ATTR, 'success');
             } else {
-                // In-flight request — register this container for when it returns
-                if (!state.pendingContainers.has(info.href)) {
-                    state.pendingContainers.set(info.href, new Set());
-                }
-                state.pendingContainers.get(info.href).add(program);
-                program.setAttribute(CONFIG.PROCESSED_ATTR, 'pending');
-                program.dataset.pendingSince = Date.now().toString();
+                // Lookup already completed with no rating
+                program.setAttribute(CONFIG.PROCESSED_ATTR, 'no-data');
             }
+            return;
+        }
+
+        // Request already in flight
+        if (state.processedItems.has(info.href)) {
+            // Register this container for when it returns
+            if (!state.pendingContainers.has(info.href)) {
+                state.pendingContainers.set(info.href, new Set());
+            }
+            state.pendingContainers.get(info.href).add(program);
+            program.setAttribute(CONFIG.PROCESSED_ATTR, 'pending');
+            program.dataset.pendingSince = Date.now().toString();
             return;
         }
 
@@ -415,6 +428,19 @@
         results.forEach(item => {
             const containers = state.pendingContainers.get(item.href);
             if (!containers) return;
+
+            // Worker hit OMDb's daily limit — not a real "not found".
+            // Don't cache; let these cards retry in a few minutes.
+            if (item.rateLimited) {
+                state.processedItems.delete(item.href);
+                state.pendingContainers.delete(item.href);
+                const retryAt = (Date.now() + RATE_LIMIT_RETRY_MS).toString();
+                containers.forEach(c => {
+                    c.setAttribute(CONFIG.PROCESSED_ATTR, 'retry');
+                    c.dataset.retryAt = retryAt;
+                });
+                return;
+            }
 
             // Treat missing/zero ratings as not-found (no "N/A" badges).
             // Cache null so duplicate cards don't loop as 'pending'.
@@ -641,8 +667,23 @@
             if (result.showImdb !== undefined) state.showImdb = result.showImdb;
             if (result.showRt !== undefined) state.showRt = result.showRt;
             log(`Settings loaded: IMDb>${state.currentThreshold}, RT>${state.currentRtThreshold}`);
+            // Apply loaded values (e.g. saved fade opacity) to the page
+            refreshSettingsUI();
         });
     };
+
+    const refreshSettingsUI = () => {
+        injectFilterStyles();
+        reapplyAllFilters();
+        updateBadgeVisibility();
+        updateBadgeScale();
+    };
+
+    // Popup saves settings to storage — every open Prime tab picks them up,
+    // not just the active one
+    chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'local') loadSettings();
+    });
 
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.type === 'APPLY_SETTINGS') {
@@ -654,11 +695,7 @@
             state.showImdb = s.showImdb;
             state.showRt = s.showRt;
 
-            // Update the dynamic filter style
-            injectFilterStyles();
-            reapplyAllFilters();
-            updateBadgeVisibility();
-            updateBadgeScale();
+            refreshSettingsUI();
 
             sendResponse({ success: true });
         }

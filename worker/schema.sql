@@ -31,3 +31,11 @@ CREATE TABLE IF NOT EXISTS episode_ratings (
 );
 
 CREATE INDEX idx_episode_series_season ON episode_ratings(series_imdb_id, season);
+
+-- Titles OMDb couldn't match, remembered for 24h so they aren't re-searched
+-- on every view. Safe to create on a live DB (does not touch `movies`):
+--   npx wrangler d1 execute prime-movies-storage --remote --command "CREATE TABLE IF NOT EXISTS not_found (prime_href TEXT PRIMARY KEY, checked_at TEXT NOT NULL)"
+CREATE TABLE IF NOT EXISTS not_found (
+    prime_href TEXT PRIMARY KEY,
+    checked_at TEXT NOT NULL
+);
