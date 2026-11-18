@@ -29,14 +29,16 @@
     // SELECTORS (Narrowed — matching Sift's approach)
     // ============================================
 
-    // Container selectors: the large sections that hold program cards
+    // Container selectors: the large sections that hold program cards.
+    // Tag-agnostic on purpose — Prime swaps <section>/<div> wrappers without notice
+    // (standard-carousel moved from <section> to <div>, breaking every row).
     const CONTAINER_SELECTORS = [
-        'section[data-testid="standard-carousel"]',
-        'section[data-testid="super-carousel"]',
-        'section[data-testid="charts-container"]',
-        'section[data-testid="collection-carousel"]',
-        'div[data-testid="grid-container"]',
-        'div[data-testid="navigation-bar-content-cards-below"]',
+        '[data-testid="standard-carousel"]',
+        '[data-testid="super-carousel"]',
+        '[data-testid="charts-container"]',
+        '[data-testid="collection-carousel"]',
+        '[data-testid="grid-container"]',
+        '[data-testid="navigation-bar-content-cards-below"]',
         '[data-testid="top-hero"]',
         '[data-testid="intermission-hero"]',
         '[data-testid="atf-component"]'
@@ -52,6 +54,9 @@
         // Broad match: any card article (with or without data-card-title)
         return 'article[data-testid="card"]';
     };
+
+    // Cards matched page-wide regardless of which row/section they sit in
+    const ORPHAN_CARD_SELECTOR = '[data-testid="card"]';
 
     // Title extraction fallback strategies (hoisted to avoid re-allocation)
     const TITLE_STRATEGIES = [
@@ -144,6 +149,10 @@
         const containers = document.querySelectorAll(CONTAINER_SELECTORS);
         containers.forEach(processContainer);
 
+        // Catch-all: cards in row types not listed in CONTAINER_SELECTORS
+        // (Prime regularly introduces new carousel test IDs, e.g. "Top TV" rows)
+        processPrograms(document.querySelectorAll(`${ORPHAN_CARD_SELECTOR}:not([${CONFIG.PROCESSED_ATTR}="success"]):not([${CONFIG.PROCESSED_ATTR}="no-data"])`));
+
         // Flush any remaining batch
         if (state.currentBatch.length > 0) {
             sendBatch(state.currentBatch);
@@ -166,16 +175,18 @@
     let deferredInjections = [];
 
     const processContainer = (container) => {
-        const selector = getProgramSelector(container);
-        const programs = container.querySelectorAll(selector);
+        processPrograms(container.querySelectorAll(getProgramSelector(container)));
+    };
 
+    const processPrograms = (programs) => {
         programs.forEach(program => {
             // O(1) attribute check first — avoid querySelector on every card
             const status = program.getAttribute(CONFIG.PROCESSED_ATTR);
             if (status === 'success' || status === 'no-data') return;
 
             // Retry stuck pending items (failed requests that never resolved)
-            if (status === 'pending') {
+            // and cards whose link hadn't rendered yet
+            if (status === 'pending' || status === 'retry') {
                 const pendingTime = parseInt(program.dataset.pendingSince || '0');
                 if (pendingTime && (Date.now() - pendingTime) < 10000) return;
                 program.removeAttribute(CONFIG.PROCESSED_ATTR);
@@ -191,15 +202,19 @@
     const processProgram = (program) => {
         const info = extractInfo(program);
         if (!info || !info.href) {
-            // Mark so we don't re-run extractInfo every scan cycle
-            program.setAttribute(CONFIG.PROCESSED_ATTR, 'no-data');
+            // Card may not be fully rendered yet — back off and retry later
+            program.setAttribute(CONFIG.PROCESSED_ATTR, 'retry');
+            program.dataset.pendingSince = Date.now().toString();
             return;
         }
 
         // Check session cache first
         if (state.processedItems.has(info.href)) {
             const cached = state.sessionCache.get(info.href);
-            if (cached) {
+            if (state.sessionCache.has(info.href) && !cached) {
+                // Lookup already completed with no rating
+                program.setAttribute(CONFIG.PROCESSED_ATTR, 'no-data');
+            } else if (cached) {
                 // Defer DOM work — don't inject synchronously in the scan loop
                 deferredInjections.push({ program, cached, href: info.href });
                 program.setAttribute(CONFIG.PROCESSED_ATTR, 'success');
@@ -370,11 +385,14 @@
                     type: 'BATCH_LOOKUP',
                     movies: chunk
                 }, (response) => {
+                    const runtimeError = chrome.runtime.lastError; // read to suppress "unchecked" warning
                     if (response && response.success && response.results) {
                         log(`Received ${response.results.length} results.`);
                         handleBatchResponse(response.results);
-                    } else if (response && response.error) {
-                        logError('Batch failed:', response.error);
+                    } else {
+                        // Error response OR no response at all (service worker died, etc.)
+                        // — reset so the next scan re-queues these items
+                        logError('Batch failed:', response?.error || runtimeError?.message || 'no response');
                         chunk.forEach(item => {
                             const pending = state.pendingContainers.get(item.href);
                             if (pending) {
@@ -398,12 +416,13 @@
             const containers = state.pendingContainers.get(item.href);
             if (!containers) return;
 
-            if (item.data) {
-                state.sessionCache.set(item.href, item.data);
-            }
+            // Treat missing/zero ratings as not-found (no "N/A" badges).
+            // Cache null so duplicate cards don't loop as 'pending'.
+            const hasRating = item.data && parseFloat(item.data.rating) > 0;
+            state.sessionCache.set(item.href, hasRating ? item.data : null);
 
             containers.forEach(container => {
-                domUpdates.push({ container, data: item.data, href: item.href });
+                domUpdates.push({ container, data: hasRating ? item.data : null, href: item.href });
             });
             state.pendingContainers.delete(item.href);
         });

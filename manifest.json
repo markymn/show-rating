@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ShowRating",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Display IMDB ratings on Amazon Prime Video movie thumbnails",
   "permissions": [
     "storage"

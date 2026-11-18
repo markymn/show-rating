@@ -225,6 +225,7 @@ async function processMovieLogic(movie, cached, env) {
         // Step 3: Search API Fallback
         if (!omdbResult && needsFallback) {
             omdbResult = await fetchOMDbSearch(title, year, env.OMDB_API_KEY);
+            if (omdbResult && !isValidResult(omdbResult, entityType)) omdbResult = null;
         }
 
         // Step 4: Special Character Truncation (The Critical Split Logic)
@@ -247,6 +248,7 @@ async function processMovieLogic(movie, cached, env) {
                         omdbResult = await fetchOMDbSearch(truncatedTitle, year, env.OMDB_API_KEY);
                     }
                 }
+                if (omdbResult && !isValidResult(omdbResult, entityType)) omdbResult = null;
             }
         }
 
